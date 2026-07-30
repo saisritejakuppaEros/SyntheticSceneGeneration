@@ -1,0 +1,9 @@
+# Mesh API (.venv)
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+xatlas>=0.0.6
+gradio>=4.0
+requests>=2.31
+
+# TRELLIS API uses the TRELLIS conda env (fastapi/uvicorn installed there if missing)
