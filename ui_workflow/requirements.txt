@@ -1,0 +1,1 @@
+# UI runs inside the TRELLIS conda env (gradio is already installed there).
