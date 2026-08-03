@@ -105,6 +105,52 @@ def meshoptimizer(
     return _check(resp, "meshoptimizer")
 
 
+def instant_meshes(
+    mesh_path: Path,
+    *,
+    target_quads: int = 5000,
+    from_meshopt: bool = False,
+    dominant: bool = False,
+    boundaries: bool = True,
+) -> dict:
+    with mesh_path.open("rb") as handle:
+        resp = requests.post(
+            f"{MESH_API_URL}/v1/instant-meshes",
+            files={"mesh": (mesh_path.name, handle, "model/gltf-binary")},
+            data={
+                "target_quads": str(target_quads),
+                "from_meshopt": str(from_meshopt).lower(),
+                "dominant": str(dominant).lower(),
+                "boundaries": str(boundaries).lower(),
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+    return _check(resp, "Instant Meshes")
+
+
+def quadriflow(
+    mesh_path: Path,
+    *,
+    target_quads: int = 5000,
+    sharp: bool = False,
+    skip_repair: bool = True,
+    from_meshopt: bool = False,
+) -> dict:
+    with mesh_path.open("rb") as handle:
+        resp = requests.post(
+            f"{MESH_API_URL}/v1/quadriflow",
+            files={"mesh": (mesh_path.name, handle, "model/gltf-binary")},
+            data={
+                "target_quads": str(target_quads),
+                "sharp": str(sharp).lower(),
+                "skip_repair": str(skip_repair).lower(),
+                "from_meshopt": str(from_meshopt).lower(),
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+    return _check(resp, "QuadriFlow")
+
+
 def xatlas_uv(
     mesh_path: Path,
     *,
@@ -125,24 +171,50 @@ def transfer_texture(
     source_path: Path,
     target_path: Path,
     *,
+    target_obj_path: Path | None = None,
     texture_size: int = 512,
     uv_padding: int = 4,
     mode: str = "texture",
+    uv_method: str = "box",
+    output_format: str = "both",
 ) -> dict:
-    with source_path.open("rb") as src, target_path.open("rb") as tgt:
+    data = {
+        "texture_size": str(texture_size),
+        "uv_padding": str(uv_padding),
+        "mode": mode,
+        "uv_method": uv_method,
+        "output_format": output_format,
+    }
+    file_handles = []
+    try:
+        files: dict = {}
+        src_handle = source_path.open("rb")
+        file_handles.append(src_handle)
+        files["source"] = (source_path.name, src_handle, "model/gltf-binary")
+
+        tgt_handle = target_path.open("rb")
+        file_handles.append(tgt_handle)
+        files["target"] = (
+            target_path.name,
+            tgt_handle,
+            "model/obj" if target_path.suffix.lower() == ".obj" else "model/gltf-binary",
+        )
+
+        if target_obj_path and target_obj_path.is_file():
+            obj_handle = target_obj_path.open("rb")
+            file_handles.append(obj_handle)
+            files["target_obj"] = (target_obj_path.name, obj_handle, "model/obj")
+
         resp = requests.post(
             f"{MESH_API_URL}/v1/transfer-texture",
-            files={
-                "source": (source_path.name, src, "model/gltf-binary"),
-                "target": (target_path.name, tgt, "model/gltf-binary"),
-            },
-            data={
-                "texture_size": str(texture_size),
-                "uv_padding": str(uv_padding),
-                "mode": mode,
-            },
+            files=files,
+            data=data,
             timeout=DEFAULT_TIMEOUT,
         )
+    finally:
+        for handle in file_handles:
+            handle.close()
+
     return _check(resp, "transfer_texture")
 
 

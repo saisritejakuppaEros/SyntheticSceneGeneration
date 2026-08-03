@@ -70,6 +70,61 @@ def run_meshoptimizer(
     return run_script(SCRIPTS_DIR / "run_meshoptimizer.py", args)
 
 
+def run_instant_meshes(
+    input_path: Path,
+    output_path: Path,
+    *,
+    target_quads: int = 5000,
+    from_meshopt: bool = False,
+    dominant: bool = False,
+    boundaries: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    args = [
+        str(input_path),
+        "-o",
+        str(output_path),
+        "-f",
+        str(target_quads),
+    ]
+    if from_meshopt:
+        args.append("--from-meshopt")
+    if dominant:
+        args.append("--dominant")
+    if boundaries:
+        args.append("--boundaries")
+    else:
+        args.append("--no-boundaries")
+    return run_script(SCRIPTS_DIR / "run_instant_meshes.py", args)
+
+
+def run_quadriflow(
+    input_path: Path,
+    output_path: Path,
+    *,
+    target_quads: int = 5000,
+    sharp: bool = False,
+    skip_repair: bool = True,
+    from_meshopt: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Legacy QuadriFlow wrapper (prefer run_instant_meshes)."""
+    args = [
+        str(input_path),
+        "-o",
+        str(output_path),
+        "-f",
+        str(target_quads),
+    ]
+    if sharp:
+        args.append("--sharp")
+    if skip_repair:
+        args.append("--skip-repair")
+    else:
+        args.append("--light-repair")
+    if from_meshopt:
+        args.append("--from-meshopt")
+    return run_script(SCRIPTS_DIR / "run_quadriflow.py", args)
+
+
 def run_transfer_texture(
     source_path: Path,
     target_path: Path,

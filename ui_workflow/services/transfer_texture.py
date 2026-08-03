@@ -1,4 +1,4 @@
-"""Bake TRELLIS textures onto remeshed geometry using xatlas UVs."""
+"""Bake TRELLIS textures onto remeshed geometry; preserve quads via OBJ export."""
 
 from __future__ import annotations
 
@@ -13,6 +13,15 @@ from trimesh.triangles import closest_point as closest_point_on_triangles
 from trimesh.triangles import points_to_barycentric
 from trimesh.visual.material import PBRMaterial
 from trimesh.visual.texture import TextureVisuals
+
+from services.quad_mesh_io import (
+    attach_texture,
+    export_obj_with_uv,
+    load_quad_target,
+    merge_vertices_polygons,
+    quad_face_stats,
+    triangulated_copy,
+)
 
 
 def load_mesh(path: Path) -> trimesh.Trimesh:
@@ -33,6 +42,33 @@ def align_to_reference(mesh: trimesh.Trimesh, reference: trimesh.Trimesh) -> tri
     ref_size = np.maximum(ref_max - ref_min, 1e-8)
     aligned.vertices = (aligned.vertices - src_min) / src_size * ref_size + ref_min
     return aligned
+
+
+def _face_triangles(face: np.ndarray) -> list[np.ndarray]:
+    """Split a polygon face into triangles for rasterization."""
+    if len(face) == 3:
+        return [face]
+    if len(face) == 4:
+        return [face[[0, 1, 2]], face[[0, 2, 3]]]
+    # fan triangulation for n-gons
+    return [face[[0, i, i + 1]] for i in range(1, len(face) - 1)]
+
+
+def box_project_uv(vertices: np.ndarray) -> np.ndarray:
+    bounds = np.stack([vertices.min(axis=0), vertices.max(axis=0)])
+    size = np.maximum(bounds[1] - bounds[0], 1e-8)
+    norm = (vertices - bounds[0]) / size
+    return np.column_stack([norm[:, 0], norm[:, 2]])
+
+
+def unwrap_with_box_projection(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Box-project UVs without triangulating or changing face topology."""
+    mesh = mesh.copy()
+    mesh.remove_unreferenced_vertices()
+    mesh.merge_vertices()
+    uvs = box_project_uv(mesh.vertices)
+    mesh.visual = TextureVisuals(uv=uvs)
+    return mesh
 
 
 def _to_triangles(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -214,51 +250,99 @@ def bake_texture(
     target_path: Path,
     output_path: Path,
     *,
+    target_obj_path: Path | None = None,
     texture_size: int = 512,
     uv_padding: int = 4,
     sample_k: int = 16,
     mode: str = "texture",
+    uv_method: str = "box",
+    output_format: str = "both",
 ) -> dict:
     source_raw = load_mesh(source_path)
-    target_raw = load_mesh(target_path)
-    target = unwrap_with_xatlas(target_raw, padding=uv_padding)
-    source = align_to_reference(source_raw.copy(), target)
+    quad_source = target_obj_path if target_obj_path and target_obj_path.is_file() else target_path
+    vertices, faces, target_ref = load_quad_target(quad_source)
+    work_vertices, work_faces = merge_vertices_polygons(vertices, faces)
+    face_stats = quad_face_stats(work_faces)
+
+    if uv_method == "box":
+        uvs = box_project_uv(work_vertices)
+    else:
+        tri_mesh = unwrap_with_xatlas(triangulated_copy(work_vertices, work_faces), padding=uv_padding)
+        work_vertices = tri_mesh.vertices
+        work_faces = tri_mesh.faces
+        uvs = tri_mesh.visual.uv
+        face_stats = quad_face_stats(work_faces)
+
+    source = align_to_reference(
+        source_raw.copy(),
+        target_ref or triangulated_copy(work_vertices, work_faces),
+    )
+
+    output_obj = output_path.with_suffix(".obj")
+    output_glb = output_path if output_path.suffix.lower() == ".glb" else output_path.with_suffix(".glb")
+    texture_png = output_path.with_suffix(".png")
 
     if mode == "vertex":
         sampler = SourceSampler(source, texture_image(source), k=sample_k)
-        rgba = sampler.sample(target.vertices)
-        result = target.copy()
-        result.visual = trimesh.visual.ColorVisuals(vertex_colors=rgba)
+        rgba = sampler.sample(work_vertices)
+        export_obj_with_uv(
+            output_obj,
+            work_vertices,
+            work_faces,
+            uvs,
+            vertex_colors=rgba,
+        )
+        result_glb = None
+        if output_format in {"glb", "both"}:
+            result_glb = triangulated_copy(work_vertices, work_faces)
+            result_glb.visual = trimesh.visual.ColorVisuals(vertex_colors=rgba)
+            trimesh.Scene(result_glb).export(output_glb, file_type="glb")
     else:
         sampler = SourceSampler(source, texture_image(source), k=sample_k)
-        uvs = target.visual.uv
         atlas = np.zeros((texture_size, texture_size, 3), dtype=np.uint8)
         mask = np.zeros((texture_size, texture_size), dtype=bool)
 
-        for face in target.faces:
-            uv_tri = uvs[face]
-            tri_colors = sampler.sample(target.vertices[face])
-            _rasterize_uv_face(atlas, mask, uv_tri, tri_colors[:, :3])
+        for face in work_faces:
+            face_arr = np.asarray(face, dtype=np.int64)
+            for tri in _face_triangles(face_arr):
+                uv_tri = uvs[tri]
+                tri_colors = sampler.sample(work_vertices[tri])
+                _rasterize_uv_face(atlas, mask, uv_tri, tri_colors[:, :3])
 
         if not mask.any():
             raise RuntimeError("Texture bake produced an empty atlas")
 
         _fill_atlas_gaps(atlas, mask)
+        Image.fromarray(atlas, mode="RGB").save(texture_png)
+        export_obj_with_uv(
+            output_obj,
+            work_vertices,
+            work_faces,
+            uvs,
+            texture_path=texture_png,
+        )
 
-        result = target.copy()
-        material = PBRMaterial(baseColorTexture=Image.fromarray(atlas, mode="RGB"))
-        result.visual = TextureVisuals(uv=uvs, material=material)
+        result_glb = None
+        if output_format in {"glb", "both"}:
+            result_glb = attach_texture(triangulated_copy(work_vertices, work_faces), uvs, atlas)
+            trimesh.Scene(result_glb).export(output_glb, file_type="glb")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    trimesh.Scene(result).export(output_path, file_type="glb")
+    primary = output_obj if output_format in {"obj", "both"} else output_glb
+    primary.parent.mkdir(parents=True, exist_ok=True)
 
     return {
         "source": str(source_path),
         "target": str(target_path),
-        "output": str(output_path),
-        "vertices": len(result.vertices),
-        "faces": len(result.faces),
+        "target_obj": str(target_obj_path) if target_obj_path else None,
+        "output_obj": str(output_obj) if output_obj.is_file() else None,
+        "output_glb": str(output_glb) if output_glb.is_file() else None,
+        "output": str(primary),
+        "vertices": len(work_vertices),
+        "faces": face_stats.get("faces", len(work_faces)),
+        "quads": quad_face_stats(work_faces).get("quads", face_stats.get("quads", 0)),
+        "triangles": quad_face_stats(work_faces).get("triangles", face_stats.get("triangles", 0)),
         "texture_size": texture_size,
-        "uv_method": "xatlas",
-        "file_kb": round(output_path.stat().st_size / 1024, 1),
+        "uv_method": uv_method,
+        "output_format": output_format,
+        "file_kb": round(primary.stat().st_size / 1024, 1) if primary.is_file() else 0,
     }

@@ -17,6 +17,8 @@ JOBS_ROOT = UI_ROOT / "jobs"
 MESH_ROOT = UI_ROOT.parent
 SCRIPTS_DIR = MESH_ROOT / "scripts"
 VENV_PYTHON = MESH_ROOT / ".venv" / "bin" / "python"
+QUADRIFLOW_BIN = MESH_ROOT / "QuadriFlow" / "build" / "quadriflow"
+INSTANT_MESHES_BIN = MESH_ROOT / "instant-meshes" / "build" / "Instant Meshes"
 
 
 def utc_now() -> str:
@@ -101,3 +103,82 @@ def resolve_autoremesher_output(
         f"AutoRemesher produced no output at {output_path}. "
         f"Checked: {[str(c) for c in candidates]}"
     )
+
+
+def resolve_quadriflow_output(input_path: Path, output_path: Path) -> tuple[Path, Path | None]:
+    """Ensure API output GLB exists; quadriflow writes under quadriflow_out/."""
+    work_dir = input_path.parent / "quadriflow_out"
+    stem = input_path.stem
+    obj_path = work_dir / f"{stem}_quadriflow.obj"
+
+    if not output_path.is_file():
+        candidates = [
+            work_dir / f"{stem}_quadriflow.glb",
+            output_path,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if candidate.resolve() != output_path.resolve():
+                    shutil.copy2(candidate, output_path)
+                break
+        else:
+            raise FileNotFoundError(
+                f"QuadriFlow produced no output at {output_path}. "
+                f"Checked: {[str(c) for c in candidates]}"
+            )
+
+    output_obj = output_path.with_suffix(".obj")
+    if obj_path.is_file():
+        if output_obj.resolve() != obj_path.resolve():
+            shutil.copy2(obj_path, output_obj)
+        return output_path, output_obj
+
+    return output_path, None
+
+
+def resolve_instant_meshes_output(input_path: Path, output_path: Path) -> tuple[Path, Path | None]:
+    """Ensure API output GLB exists; Instant Meshes writes under instant_meshes_out/."""
+    work_dir = input_path.parent / "instant_meshes_out"
+    stem = input_path.stem
+    obj_path = work_dir / f"{stem}_instant.obj"
+
+    if not output_path.is_file():
+        candidates = [
+            work_dir / f"{stem}_instant.glb",
+            output_path,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if candidate.resolve() != output_path.resolve():
+                    shutil.copy2(candidate, output_path)
+                break
+        else:
+            raise FileNotFoundError(
+                f"Instant Meshes produced no output at {output_path}. "
+                f"Checked: {[str(c) for c in candidates]}"
+            )
+
+    output_obj = output_path.with_suffix(".obj")
+    if obj_path.is_file():
+        if output_obj.resolve() != obj_path.resolve():
+            shutil.copy2(obj_path, output_obj)
+        return output_path, output_obj
+
+    return output_path, None
+
+
+def count_obj_quads(path: Path) -> dict[str, int]:
+    """Count quad vs triangle faces in an OBJ (trimesh GLB loads triangulate quads)."""
+    quads = tris = 0
+    with path.open() as handle:
+        for line in handle:
+            if not line.startswith("f "):
+                continue
+            verts = len(line.split()) - 1
+            if verts == 4:
+                quads += 1
+            elif verts == 3:
+                tris += 1
+    return {"quads": quads, "triangles": tris}

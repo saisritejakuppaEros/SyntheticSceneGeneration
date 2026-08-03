@@ -97,7 +97,9 @@ curl -o out.glb "http://localhost:8100/v1/jobs/${JOB_ID}/glb"
 
 ---
 
-## 2. AutoRemesher
+## 2. AutoRemesher (solidify prep)
+
+Used by the pipeline for **solidify only** (watertight cleanup before remesh). Quad remesh is done by Instant Meshes (section 4).
 
 **API**
 
@@ -105,9 +107,7 @@ curl -o out.glb "http://localhost:8100/v1/jobs/${JOB_ID}/glb"
 curl -s -X POST http://localhost:8101/v1/autoremesher \
   -F "mesh=@/path/to/input.glb" \
   -F "target_quads=5000" \
-  -F "prep_target_tris=0" \
-  -F "solid_only=false" \
-  -F "from_solid=false" | jq
+  -F "solid_only=true" | jq
 ```
 
 **CLI**
@@ -116,20 +116,22 @@ curl -s -X POST http://localhost:8101/v1/autoremesher \
 source /devwork/teja/meshcleaning/.venv/bin/activate
 python /devwork/teja/meshcleaning/ui_workflow/cli/autoremesher.py \
   /path/to/input.glb \
-  -o /path/to/output.glb \
-  --target-quads 5000
+  -o /path/to/solid.glb \
+  --solid-only
 ```
 
 ---
 
-## 3. meshoptimizer
+## 3. meshoptimizer (triangle prep)
+
+Reduce triangle count before Instant Meshes. Typical prep: `target_tris ≈ 2 × target_quads`.
 
 **API**
 
 ```bash
 curl -s -X POST http://localhost:8101/v1/meshoptimizer \
-  -F "mesh=@/path/to/input.glb" \
-  -F "target_tris=30000" \
+  -F "mesh=@/path/to/solid.glb" \
+  -F "target_tris=10000" \
   -F "simplify_error=0.01" | jq
 ```
 
@@ -138,25 +140,79 @@ curl -s -X POST http://localhost:8101/v1/meshoptimizer \
 ```bash
 source /devwork/teja/meshcleaning/.venv/bin/activate
 python /devwork/teja/meshcleaning/ui_workflow/cli/meshoptimizer.py \
-  /path/to/input.glb \
-  -o /path/to/output.glb \
-  --target-tris 30000
+  /path/to/solid.glb \
+  -o /path/to/reduced.glb \
+  --target-tris 10000
 ```
 
 ---
 
-## 4. Texture transfer (final step)
+## 4. Instant Meshes (triangle → quad remesh)
 
-Bake TRELLIS textures onto the remeshed mesh using `scripts/transfer_texture.py`.
+Field-aligned **pure quad** remesh from a triangle mesh. Output includes GLB (preview) and OBJ (real quads).
+
+Build the binary once (system deps + cmake):
+
+```bash
+/devwork/teja/meshcleaning/scripts/build_instant_meshes.sh
+```
+
+All Python/API calls use **meshcleaning `.venv`**:
+
+```bash
+source /devwork/teja/meshcleaning/.venv/bin/activate
+```
+
+**API**
+
+```bash
+curl -s -X POST http://localhost:8101/v1/instant-meshes \
+  -F "mesh=@/path/to/reduced.glb" \
+  -F "target_quads=5000" \
+  -F "from_meshopt=true" \
+  -F "boundaries=true" | jq
+```
+
+Response includes `output_glb` and `output_obj`. `stats.obj_quads` reports quad count.
+
+**CLI (.venv)**
+
+```bash
+source /devwork/teja/meshcleaning/.venv/bin/activate
+python /devwork/teja/meshcleaning/ui_workflow/cli/instant_meshes.py \
+  /path/to/reduced.glb \
+  -o /path/to/quad.glb \
+  --target-quads 5000 \
+  --from-meshopt
+```
+
+**Legacy:** `/v1/quadriflow` still available if QuadriFlow is built.
+
+---
+
+## 5. Texture transfer (final step)
+
+Bake TRELLIS textures onto the Instant Meshes quad OBJ. Default `uv_method=box` and `output_format=both`.
+
+**Primary output is `output_obj`** — pure quad faces (`f v1 v2 v3 v4`). GLB is preview-only.
 
 **API**
 
 ```bash
 curl -s -X POST http://localhost:8101/v1/transfer-texture \
   -F "source=@/path/to/trellis.glb" \
-  -F "target=@/path/to/remeshed.glb" \
-  -F "texture_size=128" \
+  -F "target_obj=@/path/to/quadriflow.obj" \
+  -F "target=@/path/to/quadriflow.glb" \
+  -F "texture_size=512" \
+  -F "uv_method=box" \
+  -F "output_format=both" \
   -F "mode=texture" | jq
+```
+
+Download quad OBJ:
+
+```bash
+curl -o out.obj "http://localhost:8101/v1/jobs/${JOB_ID}/download?format=obj"
 ```
 
 **CLI**
@@ -172,7 +228,7 @@ python /devwork/teja/meshcleaning/ui_workflow/cli/transfer_texture.py \
 
 ---
 
-## 5. xatlas UV (optional) unwrap
+## 6. xatlas UV (optional) unwrap
 
 Run **after** autoremesher and meshoptimizer to generate clean UVs.
 
@@ -216,17 +272,33 @@ TRELLIS=$(curl -s -X POST "$BASE/v1/trellis/generate" -F "image=@${IMG}" -F "res
 JOB1=$(echo "$TRELLIS" | jq -r .job_id)
 GLB1=$(echo "$TRELLIS" | jq -r .glb)
 
-# 2) AutoRemesher
-AR=$(curl -s -X POST "$MESH/v1/autoremesher" -F "mesh=@${GLB1}" -F "target_quads=5000")
-GLB2=$(echo "$AR" | jq -r .output_glb)
+# 2) Solidify
+SOLID=$(curl -s -X POST "$MESH/v1/autoremesher" \
+  -F "mesh=@${GLB1}" -F "target_quads=5000" \
+  -F "solid_only=true")
+GLB_SOLID=$(echo "$SOLID" | jq -r .output_glb)
+echo "SOLID: $GLB_SOLID"
 
-# 3) meshoptimizer
-MO=$(curl -s -X POST "$MESH/v1/meshoptimizer" -F "mesh=@${GLB2}" -F "target_tris=30000")
-GLB3=$(echo "$MO" | jq -r .output_glb)
+# 3) meshoptimizer prep
+REDUCED=$(curl -s -X POST "$MESH/v1/meshoptimizer" \
+  -F "mesh=@${GLB_SOLID}" -F "target_tris=10000")
+GLB_REDUCED=$(echo "$REDUCED" | jq -r .output_glb)
+echo "REDUCED: $GLB_REDUCED"
 
-# 4) xatlas UV
-UV=$(curl -s -X POST "$MESH/v1/xatlas" -F "mesh=@${GLB3}" -F "resolution=2048")
-echo "$UV" | jq
+# 4) Instant Meshes
+IM=$(curl -s -X POST "$MESH/v1/instant-meshes" \
+  -F "mesh=@${GLB_REDUCED}" -F "target_quads=5000" \
+  -F "from_meshopt=true" -F "boundaries=true")
+GLB_IM=$(echo "$IM" | jq -r .output_glb)
+OBJ_IM=$(echo "$IM" | jq -r .output_obj)
+echo "INSTANT MESHES GLB: $GLB_IM"
+echo "INSTANT MESHES OBJ: $OBJ_IM"
+
+# 5) Texture transfer
+FINAL=$(curl -s -X POST "$MESH/v1/transfer-texture" \
+  -F "source=@${GLB1}" -F "target_obj=@${OBJ_IM}" -F "target=@${GLB_IM}" \
+  -F "texture_size=512" -F "uv_method=box" -F "output_format=both")
+echo "$FINAL" | jq
 ```
 
 Job artifacts are stored under `ui_workflow/jobs/<job_id>/`.
